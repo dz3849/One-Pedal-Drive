@@ -290,7 +290,7 @@ def read_from_arduino(com_port, baud_rate):
 # ----------------------------
 def main():
 
-    arduino_port = 'COM5' 
+    arduino_port = 'COM5' # This may change make sure to check
     baud_rate = 9600
     # start the serial reader on a separate thread so the rest of main can run
     reader_thread = threading.Thread(target=read_from_arduino, args=(arduino_port, baud_rate), daemon=True)
@@ -315,7 +315,7 @@ def main():
 
         # Replace this with: samples = serial_reader.read_latest_batch()
         t = time.time() - t0
-        samples = fake_sensor_stream(t)
+        samples = fake_sensor_stream(t) #replease with ultrasonic data
 
         world.ingest(samples)
         draw(world, screen, font)
