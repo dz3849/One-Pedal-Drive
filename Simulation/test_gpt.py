@@ -17,7 +17,7 @@ import threading
 
 data_queue = Queue()
 
-data_dict = {"drive": '', "delta": '', "pwm": ''}
+data_dict = {"drive": '', "delta": '', "pwm": '', "Obstacle_Distance": ''}
 # ----------------------------
 # Config
 # ----------------------------
@@ -235,6 +235,7 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
     drive_indicator = (data_dict["drive"])
     delta_indicator = (data_dict["delta"])
     pwm_indicator = (data_dict["pwm"])
+    distance_indicator = (data_dict["Obstacle_Distance"])
     # HUD text
     lines = [
         #f"closest_raw:    {world.closest_raw:.2f} m" if world.closest_raw is not None else "closest_raw:    -",
@@ -244,6 +245,7 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
         f"DRIVE: {drive_indicator} " if drive_indicator is not None else "Drive Indicator: -",
         f"DELTA: {delta_indicator} " if delta_indicator is not None else "Change in pedal angle: -",
         f"PWM: {pwm_indicator}" if pwm_indicator is not None else "PWM Indicator: -",
+        f"Obstacle_Distance: {distance_indicator}" if distance_indicator is not None else "Obstacle_Distance: -",
 
     ]
     y0 = 18
@@ -271,7 +273,7 @@ def read_from_arduino(com_port, baud_rate):
                         "drive": data_array[0],
                         "delta": data_array[1],
                         "pwm": data_array[2],
-                        "distance": data_array[3]
+                        "Obstacle_Distance": data_array[3]
                     }
                     #print(f"Received: {data_dict}")
 
@@ -288,7 +290,7 @@ def read_from_arduino(com_port, baud_rate):
 # ----------------------------
 def main():
 
-    arduino_port = 'COM6' 
+    arduino_port = 'COM5' 
     baud_rate = 9600
     # start the serial reader on a separate thread so the rest of main can run
     reader_thread = threading.Thread(target=read_from_arduino, args=(arduino_port, baud_rate), daemon=True)
