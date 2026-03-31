@@ -127,7 +127,7 @@ class Kalman1D_DistVel:
         return float(self.x[0, 0]), float(self.x[1, 0])
 
 # ----------------------------
-# Fake sensor stream (replace with pyserial later)
+# Fake sensor stream (replace with ultrasonic stream)
 # ----------------------------
 def fake_sensor_stream(t: float) -> List[SensorSample]:
     """
@@ -153,6 +153,11 @@ def fake_sensor_stream(t: float) -> List[SensorSample]:
         r = float(np.clip(r, MIN_RANGE_M, MAX_RANGE_M))
         samples.append(SensorSample(t=time.time(), angle_deg=float(ang), range_m=r))
     return samples
+
+# ----------------------------
+# Ultrasonic sensor stream (yet to be tested)
+# ----------------------------
+
 
 # ----------------------------
 # World model
@@ -250,7 +255,6 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
 
 def read_from_arduino(com_port, baud_rate):
     global data_dict
-    # Establish the serial connection. Replace 'COM4' with your Arduino's port (e.g., '/dev/ttyACM0' on Linux, 'COM1' on Windows)
     try:
         ser = serial.Serial(com_port, baud_rate, timeout=1)
         time.sleep(2) # Give the connection time to establish
@@ -265,7 +269,8 @@ def read_from_arduino(com_port, baud_rate):
                     data_dict = {
                         "drive": data_array[0],
                         "delta": data_array[1],
-                        "pwm": data_array[2]
+                        "pwm": data_array[2],
+                        "distance": data_array[3]
                     }
                     #print(f"Received: {data_dict}")
 

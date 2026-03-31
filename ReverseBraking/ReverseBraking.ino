@@ -1,3 +1,6 @@
+#include <NewPing.h>
+#include <Servo.h>
+
 //Arduino Pins
 int sensorPin = A0;
 int accelLED = 3;
@@ -23,6 +26,12 @@ const int MIN_BRAKE_PWM = 80;           // minimum PWM during braking so it actu
 
 // Optional: limit brake strength so you don't slam
 const int MAX_BRAKE_PWM = 200;          // cap braking PWM (tune)
+
+//Ultrasonic Parameters, cm
+int maxDistance = 100;
+int TriggerPin = 12;
+int EchoPin = 13;
+NewPing sonar(TriggerPin, EchoPin, 100);
 
 void setup() {
   Serial.begin(9600);
@@ -56,6 +65,10 @@ void loop() {
   int pwm = map(percent, 1, 100, 0, 255);
   pwm = constrain(pwm, 0, 255);
 
+  // Ultrasonic reading
+  int distance = sonar.ping_cm();
+  
+  
   // LEDs (based on delta)
   if (delta > threshold) {
     digitalWrite(accelLED, HIGH);
@@ -69,6 +82,7 @@ void loop() {
     digitalWrite(accelLED, LOW);
     digitalWrite(decelLED, LOW);
     digitalWrite(neutralLED, HIGH);
+
   }
 
   // --- BRAKE CONDITION: pedal dropped fast enough ---
@@ -89,15 +103,21 @@ void loop() {
     Serial.print("BRAKE delta=");
     Serial.print(delta);
     Serial.print(" brakePwm=");
-    Serial.println(brakePwm);
+    Serial.print(brakePwm);
+    Serial.print(" Obstacle_Distance=");
+    Serial.println(distance);
 
-  } else {
+
+  }
+  else {
     // Normal forward drive
     forwardDrive(pwm);
     Serial.print("DRIVE delta=");
     Serial.print(delta);
     Serial.print(" pwm=");
-    Serial.println(pwm);
+    Serial.print(pwm);
+    Serial.print(" Obstacle_Distance=");
+    Serial.println(distance);
   }
 
   previousVal = currentVal;
