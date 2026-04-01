@@ -319,8 +319,14 @@ def read_from_arduino(com_port, baud_rate):
 # Main loop
 # ----------------------------
 def main():
+    import platform
 
-    arduino_port = 'COM5' # This may change make sure to check
+if platform.system() == "Darwin":   # Mac
+    arduino_port = "/dev/tty.usbmodem1101"
+elif platform.system() == "Windows":
+    arduino_port = "COM5"
+else:
+    arduino_port = "/dev/ttyUSB0" # Update this to your Arduino's port 
     baud_rate = 9600
     # start the serial reader on a separate thread so the rest of main can run
     reader_thread = threading.Thread(target=read_from_arduino, args=(arduino_port, baud_rate), daemon=True)
