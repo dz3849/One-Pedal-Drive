@@ -100,23 +100,24 @@ void loop() {
     // After brake pulse, go back to forward drive based on current pedal
     forwardDrive(pwm);
 
-    Serial.print("BRAKE delta=");
-    Serial.print(delta);
-    Serial.print(" brakePwm=");
-    Serial.print(brakePwm);
-    Serial.print(" Obstacle_Distance=");
+    Serial.print(0); //state Break
+    Serial.print(" ")
+    Serial.print(delta); //motor delta
+    Serial.print(" ");
+    Serial.print(pwm); // pedal angle
+    Serial.print(" "); // Obstacle Distance
     Serial.println(distance);
-
 
   }
   else {
     // Normal forward drive
     forwardDrive(pwm);
-    Serial.print("DRIVE delta=");
-    Serial.print(delta);
-    Serial.print(" pwm=");
-    Serial.print(pwm);
-    Serial.print(" Obstacle_Distance=");
+    Serial.print(1); //state drive
+    Serial.print(" ")
+    Serial.print(delta); //motor delta
+    Serial.print(" ");
+    Serial.print(pwm); // pedal angle
+    Serial.print(" "); // Obstacle Distance
     Serial.println(distance);
   }
 
