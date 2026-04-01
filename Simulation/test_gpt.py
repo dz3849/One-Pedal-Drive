@@ -3,7 +3,6 @@ import time
 import random
 import threading
 from dataclasses import dataclass
-#from turtle import distance
 from typing import Optional, List, Tuple, Deque
 from collections import deque
 from queue import Queue, Empty
@@ -174,6 +173,8 @@ class WorldModel:
         self.gate = RangeOutlierGate(OUTLIER_JUMP_M)
         self.ema = EMAFilter(EMA_ALPHA)
         self.kf = Kalman1D_DistVel()
+        self.last_detection_time = None
+        self.detection_timeout = 0.25   # seconds (tune this)
 
     def ingest(self, samples: List[SensorSample]):
         # Convert polar to Cartesian in car frame (x forward, y left)
@@ -192,6 +193,7 @@ class WorldModel:
 
         closest = min(s.range_m for s in samples)
         self.closest_raw = closest
+        self.last_detection_time = time.time()
 
         # Outlier gate on the "closest" distance (simple + effective)
         if self.gate.accept(closest):
@@ -200,7 +202,27 @@ class WorldModel:
             self.closest_kf = d_kf
             self.approach_speed = -v_kf  # positive means approaching
         # else: ignore update; keep last filtered values
+    def mark_no_detection(self):
+        """
+        Call this when no valid sensor samples are received.
+        Clears obstacle if it hasn't been seen recently.
+        """
+        # First time: nothing ever detected
+        if self.last_detection_time is None:
+            self.closest_raw = None
+            self.closest_smooth = None
+            self.closest_kf = None
+            self.approach_speed = None
+            self.points_car_frame.clear()
+            return
 
+        # If too much time has passed → forget obstacle
+        if time.time() - self.last_detection_time > self.detection_timeout:
+            self.closest_raw = None
+            self.closest_smooth = None
+            self.closest_kf = None
+            self.approach_speed = None
+            self.points_car_frame.clear()
 # ----------------------------
 # Rendering
 # ----------------------------
@@ -211,7 +233,6 @@ def meters_to_screen(dx_m: float, dy_m: float) -> Tuple[int, int]:
     return x, y
 
 def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
-    # make sure we refer to the shared dictionary
     global data_dict
     screen.fill((18, 18, 22))
 
@@ -220,40 +241,48 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
     car_rect.center = CAR_POS
     pygame.draw.rect(screen, (240, 240, 240), car_rect, border_radius=6)
 
-    # Draw sensor points
-    for (x_m, y_m) in list(world.points_car_frame)[-180:]:
-        px, py = meters_to_screen(x_m, y_m)
-        # fade distant points (manual "brightness" without extra libs)
-        if x_m < 0:
-            continue
-        pygame.draw.circle(screen, (90, 200, 255), (px, py), 3)
-
-    # Draw "closest obstacle" marker straight ahead using filtered distance
+    # Choose one obstacle distance to display
+    obstacle_distance = None
     if world.closest_kf is not None:
-        px, py = meters_to_screen(world.closest_kf, 0.0)
-        pygame.draw.circle(screen, (255, 130, 90), (px, py), 10, width=2)
+        obstacle_distance = world.closest_kf
+    elif world.closest_smooth is not None:
+        obstacle_distance = world.closest_smooth
+    elif world.closest_raw is not None:
+        obstacle_distance = world.closest_raw
 
-    drive_indicator = (data_dict["drive"])
-    delta_indicator = (data_dict["delta"])
-    pwm_indicator = (data_dict["pwm"])
-    distance_indicator = (data_dict["Obstacle_Distance"])
-    # HUD text
+    # Draw one big obstacle block only if it is in range
+    if obstacle_distance is not None and MIN_RANGE_M <= obstacle_distance <= MAX_RANGE_M:
+        obstacle_x, obstacle_y = meters_to_screen(obstacle_distance, 0.0)
+
+        obstacle_width_px = 40
+        obstacle_height_px = 40
+
+        obstacle_rect = pygame.Rect(
+            obstacle_x - obstacle_width_px // 2,
+            obstacle_y - obstacle_height_px // 2,
+            obstacle_width_px,
+            obstacle_height_px
+        )
+
+        pygame.draw.rect(screen, (255, 130, 90), obstacle_rect, border_radius=4)
+
+    drive_indicator = data_dict["drive"]
+    delta_indicator = data_dict["delta"]
+    pwm_indicator = data_dict["pwm"]
+    distance_indicator = data_dict["Obstacle_Distance"]
+
     lines = [
-        #f"closest_raw:    {world.closest_raw:.2f} m" if world.closest_raw is not None else "closest_raw:    -",
-        #f"closest_ema:    {world.closest_smooth:.2f} m" if world.closest_smooth is not None else "closest_ema:    -",
-        #f"closest_kalman: {world.closest_kf:.2f} m" if world.closest_kf is not None else "closest_kalman: -",
         f"approach_speed: {world.approach_speed:.2f} m/s" if world.approach_speed is not None else "approach_speed: -",
-        f"DRIVE: {drive_indicator} " if drive_indicator is not None else "Drive Indicator: -",
-        f"DELTA: {delta_indicator} " if delta_indicator is not None else "Change in pedal angle: -",
-        f"PWM: {pwm_indicator}" if pwm_indicator is not None else "PWM Indicator: -",
+        f"DRIVE: {drive_indicator}" if drive_indicator is not None else "DRIVE: -",
+        f"DELTA: {delta_indicator}" if delta_indicator is not None else "DELTA: -",
+        f"PWM: {pwm_indicator}" if pwm_indicator is not None else "PWM: -",
         f"Obstacle_Distance: {distance_indicator}" if distance_indicator is not None else "Obstacle_Distance: -",
-
     ]
+
     y0 = 18
     for i, txt in enumerate(lines):
         surf = font.render(txt, True, (235, 235, 235))
         screen.blit(surf, (18, y0 + 22 * i))
-
 
 #Communication:
 
@@ -267,29 +296,9 @@ def read_from_arduino(com_port, baud_rate):
         while True:
             if ser.in_waiting > 0:
                 # Read the line, decode it from bytes to string, and strip whitespace/newline
-                #data_line = ser.readline().decode('utf-8').strip()
-                data_line = ser.readline().decode('utf-8', errors='ignore').strip()
+                data_line = ser.readline().decode('utf-8').strip()
                 if data_line:
-                    #data_array = data_line.split(' ')
                     data_array = data_line.split(' ')
-
-                    # --- make sure we got all values ---
-                    if len(data_array) < 4:
-                        continue  # skip bad line
-
-                    # --- safely convert distance ---
-                    try:
-                        distance = float(data_array[3])
-                    except ValueError:
-                        continue  # skip if conversion fails
-
-                    distance = float(data_array[3])  # make sure units are meters
-                    sample = SensorSample(
-                        t=time.time(),
-                        angle_deg=0.0,   # ultrasonic = straight ahead
-                        range_m=distance
-                    )
-                    data_queue.put(sample)
                     data_dict = {
                         "drive": data_array[0],
                         "delta": data_array[1],
@@ -306,9 +315,12 @@ def read_from_arduino(com_port, baud_rate):
         if 'ser' in locals() and ser.isOpen():
             ser.close()
 
-
+# ----------------------------
+# Main loop
+# ----------------------------
 def main():
-    arduino_port = 'COM5'  # Update this to your Arduino's port 
+
+    arduino_port = 'COM5' # This may change make sure to check
     baud_rate = 9600
     # start the serial reader on a separate thread so the rest of main can run
     reader_thread = threading.Thread(target=read_from_arduino, args=(arduino_port, baud_rate), daemon=True)
@@ -332,7 +344,6 @@ def main():
                 running = False
 
         # Replace this with: samples = serial_reader.read_latest_batch()
-        t = time.time() - t0
         samples = []
         while True:
             try:
@@ -343,6 +354,8 @@ def main():
 
         if samples:
             world.ingest(samples)
+        else:
+            world.mark_no_detection()
         draw(world, screen, font)
         pygame.display.flip()
 

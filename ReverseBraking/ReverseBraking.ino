@@ -101,7 +101,7 @@ void loop() {
     forwardDrive(pwm);
 
     Serial.print(0); //state Break
-    Serial.print(" ")
+    Serial.print(" ");
     Serial.print(delta); //motor delta
     Serial.print(" ");
     Serial.print(pwm); // pedal angle
@@ -113,7 +113,7 @@ void loop() {
     // Normal forward drive
     forwardDrive(pwm);
     Serial.print(1); //state drive
-    Serial.print(" ")
+    Serial.print(" ");
     Serial.print(delta); //motor delta
     Serial.print(" ");
     Serial.print(pwm); // pedal angle
