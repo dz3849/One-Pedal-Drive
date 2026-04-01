@@ -3,6 +3,7 @@ import time
 import random
 import threading
 from dataclasses import dataclass
+#from turtle import distance
 from typing import Optional, List, Tuple, Deque
 from collections import deque
 from queue import Queue, Empty
@@ -266,9 +267,29 @@ def read_from_arduino(com_port, baud_rate):
         while True:
             if ser.in_waiting > 0:
                 # Read the line, decode it from bytes to string, and strip whitespace/newline
-                data_line = ser.readline().decode('utf-8').strip()
+                #data_line = ser.readline().decode('utf-8').strip()
+                data_line = ser.readline().decode('utf-8', errors='ignore').strip()
                 if data_line:
+                    #data_array = data_line.split(' ')
                     data_array = data_line.split(' ')
+
+                    # --- make sure we got all values ---
+                    if len(data_array) < 4:
+                        continue  # skip bad line
+
+                    # --- safely convert distance ---
+                    try:
+                        distance = float(data_array[3])
+                    except ValueError:
+                        continue  # skip if conversion fails
+
+                    distance = float(data_array[3])  # make sure units are meters
+                    sample = SensorSample(
+                        t=time.time(),
+                        angle_deg=0.0,   # ultrasonic = straight ahead
+                        range_m=distance
+                    )
+                    data_queue.put(sample)
                     data_dict = {
                         "drive": data_array[0],
                         "delta": data_array[1],
@@ -285,12 +306,9 @@ def read_from_arduino(com_port, baud_rate):
         if 'ser' in locals() and ser.isOpen():
             ser.close()
 
-# ----------------------------
-# Main loop
-# ----------------------------
-def main():
 
-    arduino_port = 'COM5' # This may change make sure to check
+def main():
+    arduino_port = 'COM5'  # Update this to your Arduino's port 
     baud_rate = 9600
     # start the serial reader on a separate thread so the rest of main can run
     reader_thread = threading.Thread(target=read_from_arduino, args=(arduino_port, baud_rate), daemon=True)
@@ -315,9 +333,16 @@ def main():
 
         # Replace this with: samples = serial_reader.read_latest_batch()
         t = time.time() - t0
-        samples = fake_sensor_stream(t) #replease with ultrasonic data
+        samples = []
+        while True:
+            try:
+                sample = data_queue.get_nowait()
+                samples.append(sample)
+            except Empty:
+                break
 
-        world.ingest(samples)
+        if samples:
+            world.ingest(samples)
         draw(world, screen, font)
         pygame.display.flip()
 
