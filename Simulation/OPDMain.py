@@ -14,6 +14,7 @@ import pygame
 #Communication
 import serial
 import threading
+import platform
 
 data_queue = Queue()
 
@@ -333,53 +334,52 @@ def read_from_arduino(com_port, baud_rate):
 # Main loop
 # ----------------------------
 def main():
-    import platform
 
-if platform.system() == "Darwin":   # Mac
-    arduino_port = "/dev/tty.usbmodem1101"
-elif platform.system() == "Windows":
-    arduino_port = "COM5"
-else:
-    arduino_port = "/dev/ttyUSB0" # Update this to your Arduino's port 
-    baud_rate = 9600
-    # start the serial reader on a separate thread so the rest of main can run
-    reader_thread = threading.Thread(target=read_from_arduino, args=(arduino_port, baud_rate), daemon=True)
-    reader_thread.start()
+    if platform.system() == "Darwin":   # Mac
+        arduino_port = "/dev/tty.usbmodem1101"
+    elif platform.system() == "Windows":
+        arduino_port = "COM5"
+    else:
+        arduino_port = "/dev/ttyUSB0" # Update this to your Arduino's port 
+        baud_rate = 9600
+        # start the serial reader on a separate thread so the rest of main can run
+        reader_thread = threading.Thread(target=read_from_arduino, args=(arduino_port, baud_rate), daemon=True)
+        reader_thread.start()
 
-    pygame.init()
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("Obstacle Proximity Simulator (Arduino stream ready)")
-    clock = pygame.time.Clock()
-    font = pygame.font.SysFont("consolas", 18)
+        pygame.init()
+        screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        pygame.display.set_caption("Obstacle Proximity Simulator (Arduino stream ready)")
+        clock = pygame.time.Clock()
+        font = pygame.font.SysFont("consolas", 18)
 
-    world = WorldModel()
-    t0 = time.time()
+        world = WorldModel()
+        t0 = time.time()
 
-    running = True
-    while running:
-        dt = clock.tick(FPS) / 1000.0
+        running = True
+        while running:
+            dt = clock.tick(FPS) / 1000.0
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
 
-        # Replace this with: samples = serial_reader.read_latest_batch()
-        samples = []
-        while True:
-            try:
-                sample = data_queue.get_nowait()
-                samples.append(sample)
-            except Empty:
-                break
+            # Replace this with: samples = serial_reader.read_latest_batch()
+            samples = []
+            while True:
+                try:
+                    sample = data_queue.get_nowait()
+                    samples.append(sample)
+                except Empty:
+                    break
 
-        if samples:
-            world.ingest(samples)
-        else:
-            world.mark_no_detection()
-        draw(world, screen, font)
-        pygame.display.flip()
+            if samples:
+                world.ingest(samples)
+            else:
+                world.mark_no_detection()
+            draw(world, screen, font)
+            pygame.display.flip()
 
-    pygame.quit()
+        pygame.quit()
 
 if __name__ == "__main__":
     main()
