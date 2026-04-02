@@ -18,6 +18,7 @@ import threading
 data_queue = Queue()
 
 data_dict = {"drive": '', "delta": '', "pwm": '', "Obstacle_Distance": ''}
+state = ''
 # ----------------------------
 # Config
 # ----------------------------
@@ -28,7 +29,7 @@ CAR_POS = (200, HEIGHT // 2)
 CAR_SIZE = (80, 40)
 
 # Sensor/model assumptions
-MAX_RANGE_M = 4.0
+MAX_RANGE_M = 80
 MIN_RANGE_M = 0.05
 
 # Filtering
@@ -36,8 +37,7 @@ EMA_ALPHA = 0.25          # higher = less smoothing
 OUTLIER_JUMP_M = 0.6      # reject sudden jump bigger than this (tune)
 
 # World scaling
-PIXELS_PER_M = 120.0
-
+PIXELS_PER_M = 20
 
 # ----------------------------
 # Data types
@@ -263,8 +263,11 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
             obstacle_width_px,
             obstacle_height_px
         )
-
+        state = "obstacle detected"
         pygame.draw.rect(screen, (255, 130, 90), obstacle_rect, border_radius=4)
+
+    else:
+        state = "Obstacle Distance is None"
 
     drive_indicator = data_dict["drive"]
     delta_indicator = data_dict["delta"]
@@ -277,6 +280,7 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
         f"DELTA: {delta_indicator}" if delta_indicator is not None else "DELTA: -",
         f"PWM: {pwm_indicator}" if pwm_indicator is not None else "PWM: -",
         f"Obstacle_Distance: {distance_indicator}" if distance_indicator is not None else "Obstacle_Distance: -",
+        f"State: {state}" if state is not None else "Obstacle State: -"
     ]
 
     y0 = 18
@@ -305,7 +309,17 @@ def read_from_arduino(com_port, baud_rate):
                         "pwm": data_array[2],
                         "Obstacle_Distance": data_array[3]
                     }
+                   
                     #print(f"Received: {data_dict}")
+                if MIN_RANGE_M <= float(data_dict["Obstacle_Distance"]) <= MAX_RANGE_M:
+                    sample = SensorSample(
+                        t=time.time(),
+                        angle_deg=0.0,
+                        range_m=float(data_dict["Obstacle_Distance"])
+                    )
+                    data_queue.put(sample)
+                else:
+                    print(f"Distance out of range for sim")
 
     except serial.SerialException as e:
         print(f"Error opening serial port: {e}")
