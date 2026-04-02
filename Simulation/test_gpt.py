@@ -18,6 +18,7 @@ import threading
 data_queue = Queue()
 
 data_dict = {"drive": '', "delta": '', "pwm": '', "Obstacle_Distance": ''}
+state = ''
 # ----------------------------
 # Config
 # ----------------------------
@@ -37,7 +38,6 @@ OUTLIER_JUMP_M = 0.6      # reject sudden jump bigger than this (tune)
 
 # World scaling
 PIXELS_PER_M = 120.0
-
 
 # ----------------------------
 # Data types
@@ -263,8 +263,11 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
             obstacle_width_px,
             obstacle_height_px
         )
-
+        state = "obstacle detected"
         pygame.draw.rect(screen, (255, 130, 90), obstacle_rect, border_radius=4)
+
+    else:
+        state = "Obstacle Distance is None"
 
     drive_indicator = data_dict["drive"]
     delta_indicator = data_dict["delta"]
@@ -277,6 +280,7 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
         f"DELTA: {delta_indicator}" if delta_indicator is not None else "DELTA: -",
         f"PWM: {pwm_indicator}" if pwm_indicator is not None else "PWM: -",
         f"Obstacle_Distance: {distance_indicator}" if distance_indicator is not None else "Obstacle_Distance: -",
+        f"State: {state}" if state is not None else "Obstacle State: -"
     ]
 
     y0 = 18
