@@ -42,6 +42,12 @@ unsigned long lastRPMTime = 0;
 long lastCountForRPM = 0;
 const float CPR = 32.0;
 
+unsigned long now = millis();
+long countNow;
+long deltaCount;
+float rpm = 0.0;
+char* directionText = "stopped";
+
 void encoderISR_A() {
   int a = digitalRead(ENC_A);
   int b = digitalRead(ENC_B);
@@ -75,7 +81,6 @@ void setup() {
 
   lastRPMTime = millis();
 
-  Serial.println("state delta pwm distance encoder_count direction rpm");
 }
 
 void loop() {
@@ -132,11 +137,7 @@ void loop() {
   }
 
   // ---------- Compute encoder-based direction and RPM ----------
-  unsigned long now = millis();
-  long countNow;
-  long deltaCount;
-  float rpm = 0.0;
-  const char* directionText = "stopped";
+
 
   noInterrupts();
   countNow = encoderCount;

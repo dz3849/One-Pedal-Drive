@@ -282,7 +282,7 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
         f"Obstacle_Distance: {distance_indicator}" if distance_indicator is not None else "Obstacle_Distance: -",
         f"State: {state}" if state is not None else "Obstacle State: -"
         f"Encoder_Count: {Encoder_indicator}" if Encoder_indicator is not None else "ENcoder_Count: -",
-        f"Direction: {direction_indicator}" if direction_indicator is not None else "Direction",
+        f"Direction: {direction_indicator}" if direction_indicator is not None else "Direction: -",
         f"RPM: {rpm_indicator}" if rpm_indicator is not None else "RPM: -"
     ]
 
@@ -343,8 +343,8 @@ def main():
     if platform.system() == "Darwin":   # Mac
         arduino_port = "/dev/tty.usbmodem1101"
     elif platform.system() == "Windows":
-        arduino_port = "COM5"
-    else:
+        arduino_port = "COM6"
+    else: 
         arduino_port = "/dev/ttyUSB0" # Update this to your Arduino's port 
     baud_rate = 9600
     # start the serial reader on a separate thread so the rest of main can run
