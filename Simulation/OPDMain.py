@@ -18,7 +18,7 @@ import platform
 
 data_queue = Queue()
 
-data_dict = {"drive": '', "delta": '', "pwm": '', "Obstacle_Distance": ''}
+data_dict = {"drive": '', "delta": '', "pwm": '', "Obstacle_Distance": '', "Encoder_Count": '', "Direction": '', "RPM": ''}
 state = ''
 # ----------------------------
 # Config
@@ -156,10 +156,6 @@ def fake_sensor_stream(t: float) -> List[SensorSample]:
         samples.append(SensorSample(t=time.time(), angle_deg=float(ang), range_m=r))
     return samples
 
-# ----------------------------
-# Ultrasonic sensor stream (yet to be tested)
-# ----------------------------
-
 
 # ----------------------------
 # World model
@@ -274,6 +270,9 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
     delta_indicator = data_dict["delta"]
     pwm_indicator = data_dict["pwm"]
     distance_indicator = data_dict["Obstacle_Distance"]
+    Encoder_indicator = data_dict["Encoder_Count"]
+    direction_indicator = data_dict["Direction"]
+    rpm_indicator = data_dict["RPM"]
 
     lines = [
         f"approach_speed: {world.approach_speed:.2f} m/s" if world.approach_speed is not None else "approach_speed: -",
@@ -282,6 +281,9 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
         f"PWM: {pwm_indicator}" if pwm_indicator is not None else "PWM: -",
         f"Obstacle_Distance: {distance_indicator}" if distance_indicator is not None else "Obstacle_Distance: -",
         f"State: {state}" if state is not None else "Obstacle State: -"
+        f"Encoder_Count: {Encoder_indicator}" if Encoder_indicator is not None else "ENcoder_Count: -",
+        f"Direction: {direction_indicator}" if direction_indicator is not None else "Direction",
+        f"RPM: {rpm_indicator}" if rpm_indicator is not None else "RPM: -"
     ]
 
     y0 = 18
@@ -308,7 +310,10 @@ def read_from_arduino(com_port, baud_rate):
                         "drive": data_array[0],
                         "delta": data_array[1],
                         "pwm": data_array[2],
-                        "Obstacle_Distance": data_array[3]
+                        "Obstacle_Distance": data_array[3],
+                        "Encoder_Count": data_array[4],
+                        "Direction": data_array[5],
+                        "RPM": data_array[6]
                     }
                    
                     #print(f"Received: {data_dict}")
@@ -341,45 +346,45 @@ def main():
         arduino_port = "COM5"
     else:
         arduino_port = "/dev/ttyUSB0" # Update this to your Arduino's port 
-        baud_rate = 9600
-        # start the serial reader on a separate thread so the rest of main can run
-        reader_thread = threading.Thread(target=read_from_arduino, args=(arduino_port, baud_rate), daemon=True)
-        reader_thread.start()
+    baud_rate = 9600
+    # start the serial reader on a separate thread so the rest of main can run
+    reader_thread = threading.Thread(target=read_from_arduino, args=(arduino_port, baud_rate), daemon=True)
+    reader_thread.start()
 
-        pygame.init()
-        screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        pygame.display.set_caption("Obstacle Proximity Simulator (Arduino stream ready)")
-        clock = pygame.time.Clock()
-        font = pygame.font.SysFont("consolas", 18)
+    pygame.init()
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    pygame.display.set_caption("Obstacle Proximity Simulator (Arduino stream ready)")
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont("consolas", 18)
 
-        world = WorldModel()
-        t0 = time.time()
+    world = WorldModel()
+    t0 = time.time()
 
-        running = True
-        while running:
-            dt = clock.tick(FPS) / 1000.0
+    running = True
+    while running:
+        dt = clock.tick(FPS) / 1000.0
 
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
 
-            # Replace this with: samples = serial_reader.read_latest_batch()
-            samples = []
-            while True:
-                try:
-                    sample = data_queue.get_nowait()
-                    samples.append(sample)
-                except Empty:
-                    break
+        # Replace this with: samples = serial_reader.read_latest_batch()
+        samples = []
+        while True:
+            try:
+                sample = data_queue.get_nowait()
+                samples.append(sample)
+            except Empty:
+                break
 
-            if samples:
-                world.ingest(samples)
-            else:
-                world.mark_no_detection()
-            draw(world, screen, font)
-            pygame.display.flip()
+        if samples:
+            world.ingest(samples)
+        else:
+            world.mark_no_detection()
+        draw(world, screen, font)
+        pygame.display.flip()
 
-        pygame.quit()
+    pygame.quit()
 
 if __name__ == "__main__":
     main()

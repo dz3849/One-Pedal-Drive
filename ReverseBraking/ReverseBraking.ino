@@ -54,7 +54,7 @@ void encoderISR_A() {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
 
   pinMode(accelLED, OUTPUT);
   pinMode(decelLED, OUTPUT);
@@ -125,10 +125,10 @@ void loop() {
 
     // After brake pulse, go back to forward drive based on current pedal
     forwardDrive(pwm);
-    state = 0; // braking
+    state = "DRIVE"; // braking
   } else {
     forwardDrive(pwm);
-    state = 1; // driving
+    state = "BREAK"; // driving
   }
 
   // ---------- Compute encoder-based direction and RPM ----------
