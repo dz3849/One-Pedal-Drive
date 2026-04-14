@@ -100,8 +100,6 @@ void setup() {
 
   lastRPMTime = millis();
 
-  Serial.println("System started");
-  Serial.println("percent,delta,pwm,distance_cm,mode,encoder_count,direction,rpm");
 }
 
 void loop() {

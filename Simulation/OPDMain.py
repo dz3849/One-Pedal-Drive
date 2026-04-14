@@ -18,7 +18,7 @@ import platform
 
 data_queue = Queue()
 
-data_dict = {"drive": '', "delta": '', "pwm": '', "Obstacle_Distance": '', "Encoder_Count": '', "Direction": '', "RPM": ''}
+data_dict = {"drive": '', "delta": '', "pwm": '', "Obstacle_Distance": '', "Mode": '', "Encoder_Count": '', "Direction": '', "RPM": ''}
 state = ''
 # ----------------------------
 # Config
@@ -29,8 +29,15 @@ FPS = 60
 CAR_POS = (200, HEIGHT // 2)
 CAR_SIZE = (80, 40)
 
+# Lane dash settings
+LANE_COLOR = (235, 235, 235)
+LANE_WIDTH = 4
+DASH_LENGTH = 40
+GAP_LENGTH = 30
+LANE_Y_OFFSET = 70  
+
 # Sensor/model assumptions
-MAX_RANGE_M = 80
+MAX_RANGE_M = 70
 MIN_RANGE_M = 0.05
 
 # Filtering
@@ -129,35 +136,6 @@ class Kalman1D_DistVel:
         return float(self.x[0, 0]), float(self.x[1, 0])
 
 # ----------------------------
-# Fake sensor stream (replace with ultrasonic stream)
-# ----------------------------
-def fake_sensor_stream(t: float) -> List[SensorSample]:
-    """
-    Produces either:
-    - single forward range (angle=0), like ultrasonic
-    - or a small "sweep" of angles like a scanning lidar
-    """
-    # Obstacle moving toward car
-    base_dist = 3.5 - 0.35 * t  # meters
-    base_dist = max(0.3, base_dist)
-
-    samples = []
-    # pretend we have a sweep -30..+30 degrees
-    for ang in [-30, -15, 0, 15, 30]:
-        noise = random.gauss(0, 0.07)  # sensor noise
-        # make side angles slightly longer (geometry-ish)
-        r = base_dist / max(0.7, math.cos(math.radians(ang))) + noise
-
-        # occasional outlier
-        if random.random() < 0.02:
-            r += random.choice([-1.0, 1.0]) * random.uniform(0.8, 1.5)
-
-        r = float(np.clip(r, MIN_RANGE_M, MAX_RANGE_M))
-        samples.append(SensorSample(t=time.time(), angle_deg=float(ang), range_m=r))
-    return samples
-
-
-# ----------------------------
 # World model
 # ----------------------------
 class WorldModel:
@@ -229,9 +207,36 @@ def meters_to_screen(dx_m: float, dy_m: float) -> Tuple[int, int]:
     y = int(CAR_POS[1] - dy_m * PIXELS_PER_M)
     return x, y
 
-def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
+def draw_lane_dashes(screen: pygame.Surface, dash_offset: float):
+    """
+    Draw two horizontal dashed lane-divider lines that scroll left.
+    dash_offset should increase with vehicle speed.
+    """
+    y_top = CAR_POS[1] - LANE_Y_OFFSET
+    y_bottom = CAR_POS[1] + LANE_Y_OFFSET
+
+    pattern = DASH_LENGTH + GAP_LENGTH
+
+    # start from off-screen so dashes always cover full width
+    start_x = -pattern + int(dash_offset % pattern)
+
+    for y in [y_top, y_bottom]:
+        x = start_x
+        while x < WIDTH:
+            pygame.draw.line(
+                screen,
+                LANE_COLOR,
+                (x, y),
+                (x + DASH_LENGTH, y),
+                LANE_WIDTH
+            )
+            x += pattern
+
+def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font, dash_offset: float):    
     global data_dict
     screen.fill((18, 18, 22))
+
+    draw_lane_dashes(screen, dash_offset)
 
     # Draw car
     car_rect = pygame.Rect(0, 0, CAR_SIZE[0], CAR_SIZE[1])
@@ -266,6 +271,7 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
     else:
         state = "Obstacle Distance is None"
 
+    #HUD setup
     drive_indicator = data_dict["drive"]
     delta_indicator = data_dict["delta"]
     pwm_indicator = data_dict["pwm"]
@@ -274,13 +280,14 @@ def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font):
     direction_indicator = data_dict["Direction"]
     rpm_indicator = data_dict["RPM"]
 
+    #HUD
     lines = [
         f"approach_speed: {world.approach_speed:.2f} m/s" if world.approach_speed is not None else "approach_speed: -",
         f"DRIVE: {drive_indicator}" if drive_indicator is not None else "DRIVE: -",
         f"DELTA: {delta_indicator}" if delta_indicator is not None else "DELTA: -",
         f"PWM: {pwm_indicator}" if pwm_indicator is not None else "PWM: -",
         f"Obstacle_Distance: {distance_indicator}" if distance_indicator is not None else "Obstacle_Distance: -",
-        f"State: {state}" if state is not None else "Obstacle State: -"
+        f"State: {state}" if state is not None else "Obstacle State: -",
         f"Encoder_Count: {Encoder_indicator}" if Encoder_indicator is not None else "ENcoder_Count: -",
         f"Direction: {direction_indicator}" if direction_indicator is not None else "Direction: -",
         f"RPM: {rpm_indicator}" if rpm_indicator is not None else "RPM: -"
@@ -305,15 +312,16 @@ def read_from_arduino(com_port, baud_rate):
                 # Read the line, decode it from bytes to string, and strip whitespace/newline
                 data_line = ser.readline().decode('utf-8').strip()
                 if data_line:
-                    data_array = data_line.split(' ')
+                    data_array = data_line.split(',')
                     data_dict = {
                         "drive": data_array[0],
                         "delta": data_array[1],
                         "pwm": data_array[2],
                         "Obstacle_Distance": data_array[3],
-                        "Encoder_Count": data_array[4],
-                        "Direction": data_array[5],
-                        "RPM": data_array[6]
+                        "Mode": data_array[4],
+                        "Encoder_Count": data_array[5],
+                        "Direction": data_array[6],
+                        "RPM": data_array[7]
                     }
                    
                     #print(f"Received: {data_dict}")
@@ -361,6 +369,7 @@ def main():
     t0 = time.time()
 
     running = True
+    dash_offset = 0.0
     while running:
         dt = clock.tick(FPS) / 1000.0
 
@@ -374,14 +383,19 @@ def main():
             try:
                 sample = data_queue.get_nowait()
                 samples.append(sample)
+                speed_value = abs(float(data_dict["RPM"]))   
+            except (ValueError, TypeError):
+                speed_value = 0.0  
             except Empty:
                 break
 
+            dash_speed_px_per_sec = speed_value * 0.5
+            dash_offset += dash_speed_px_per_sec * dt
         if samples:
             world.ingest(samples)
         else:
             world.mark_no_detection()
-        draw(world, screen, font)
+        draw(world, screen, font, dash_offset)
         pygame.display.flip()
 
     pygame.quit()
