@@ -1,404 +1,583 @@
-import math
+import serial
 import time
-import random
-import threading
-from dataclasses import dataclass
-from typing import Optional, List, Tuple, Deque
-from collections import deque
-from queue import Queue, Empty
-#zucheng  shi sb
 import numpy as np
 import pygame
-#woshisb
-
-#Communication
-import serial
-import threading
 import platform
+from scipy.signal import cont2discrete
 
-data_queue = Queue()
+# ==========================================
+# Serial
+# ==========================================
+if platform.system() == "Darwin": 
+    PORT = "/dev/tty.usbmodem1101"
+elif platform.system() == "Windows":
+    PORT = "COM6"
+else: 
+    PORT = "/dev/ttyUSB0"   # CHANGE THIS
 
-data_dict = {"drive": '', "delta": '', "pwm": '', "Obstacle_Distance": '', "Mode": '', "Encoder_Count": '', "Direction": '', "RPM": ''}
-state = ''
-# ----------------------------
-# Config
-# ----------------------------
-WIDTH, HEIGHT = 900, 600
-FPS = 60
+BAUD = 115200
 
-CAR_POS = (200, HEIGHT // 2)
-CAR_SIZE = (80, 40)
+# ==========================================
+# Timing / MPC
+# ==========================================
+TS = 0.10
+HORIZON = 15
+CONTROL_PERIOD = TS
 
-# Lane dash settings
-LANE_COLOR = (235, 235, 235)
-LANE_WIDTH = 4
-DASH_LENGTH = 40
-GAP_LENGTH = 30
-LANE_Y_OFFSET = 70  
+# ==========================================
+# UI
+# ==========================================
+WIDTH = 1280
+HEIGHT = 420
+FPS = 30
 
-# Sensor/model assumptions
-MAX_RANGE_M = 70
-MIN_RANGE_M = 0.05
+BLACK = (0, 0, 0)
+WHITE = (255, 255, 255)
+RED = (220, 70, 70)
+GREEN = (70, 220, 70)
+YELLOW = (240, 220, 80)
+GRAY = (120, 120, 120)
+CYAN = (80, 180, 255)
+BLUE = (80, 120, 255)
 
-# Filtering
-EMA_ALPHA = 0.25          # higher = less smoothing
-OUTLIER_JUMP_M = 0.6      # reject sudden jump bigger than this (tune)
+ROAD_Y = 270
+EGO_X = 140
+EGO_Y = 230
+CAR_W = 70
+CAR_H = 35
 
-# World scaling
-PIXELS_PER_M = 20
+HUD_X_START = 30
+HUD_Y_START = 20
+HUD_LINE_H = 24
+HUD_LINES_PER_COLUMN = 8
+HUD_COLUMN_W = 360
+HUD_COLUMN_GAP = 70
+HUD_VEHICLE_CLEARANCE = 24
 
-# ----------------------------
-# Data types
-# ----------------------------
-@dataclass
-class SensorSample:
-    t: float           # seconds
-    angle_deg: float   # 0 means straight ahead; can be 0 for ultrasonic
-    range_m: float
+# Keep controller in meters.
+# IMPORTANT:
+# The ultrasonic sensor only measures about 0-150 cm, but the MPC safe gap is in
+# road-scale meters. So we map physical sensor cm into a larger virtual road gap.
 
-# ----------------------------
-# Simple filters
-# ----------------------------
-class EMAFilter:
-    def __init__(self, alpha: float, init: Optional[float] = None):
-        self.alpha = alpha
-        self.y = init
+PIXELS_PER_METER_RENDER = 12.0
+MIN_VISUAL_GAP_M = 1.0
 
-    def update(self, x: float) -> float:
-        if self.y is None:
-            self.y = x
-        else:
-            self.y = self.alpha * x + (1 - self.alpha) * self.y
-        return self.y
+# ==========================================
+# Ultrasonic handling
+# ==========================================
+MAX_DISTANCE_CM = 130
+NO_OBSTACLE_THRESHOLD_CM = 125  
+VIRTUAL_GAP_AT_THRESHOLD_M = 100  
+ULTRA_ALPHA = 0.30
+OBSTACLE_TIMEOUT_S = 0.35
 
-class RangeOutlierGate:
-    def __init__(self, max_jump_m: float):
-        self.max_jump_m = max_jump_m
-        self.prev: Optional[float] = None
+# Bench safety:
+# False means MPC can choose BRAKE internally, but Arduino receives COAST instead
+# of reverse motor drive. This prevents the motor from spinning backward wildly.
+SEND_REVERSE_BRAKE = False
 
-    def accept(self, x: float) -> bool:
-        if self.prev is None:
-            self.prev = x
-            return True
-        if abs(x - self.prev) > self.max_jump_m:
-            return False
-        self.prev = x
-        return True
+# ==========================================
+# Following-distance logic
+# ==========================================
+DISTANCE_ACTIVE_M = 60.0
+MIN_GAP_M = 8.0
+TIME_GAP_S = 1.2
 
-class Kalman1D_DistVel:
-    """
-    State: [distance; velocity]
-    Measurement: distance
-    Constant-velocity model.
-    """
-    def __init__(self):
-        self.x = np.array([[2.0], [0.0]])  # start 2m away, 0 m/s
-        self.P = np.diag([0.5, 1.0])
+STOP_LATCH_GAP_M = 9.0
+STOP_RELEASE_GAP_M = 11.0
+STOP_SPEED_KMH = 2.0
 
-        self.sigma_a = 2.0    # process accel noise (tune)
-        self.sigma_z = 0.08   # measurement noise (tune)
+# ==========================================
+# Graded braking parameters
+# ==========================================
+BRAKE_MIN_PWM_PERCENT = 10.0
+BRAKE_MAX_PWM_PERCENT = 25.0
+BRAKE_GAIN = 4.0
+BRAKE_RELEASE_MARGIN_M = 1.0 
 
-        self.last_t: Optional[float] = None
+# ==========================================
+# PWM operating region
+# ==========================================
+PWM_LEVELS = [20, 30, 40, 50, 60, 70, 80, 90]
 
-    def update(self, z: float, t: float) -> Tuple[float, float]:
-        if self.last_t is None:
-            self.last_t = t
-            self.x[0, 0] = z
-            return float(self.x[0, 0]), float(self.x[1, 0])
+def requested_pwm_from_pedal(pedal_percent: float) -> float:
+    if pedal_percent < 20:
+        return 0.0
+    if pedal_percent > 90:
+        return 90.0
+    return pedal_percent
 
-        dt = max(1e-3, t - self.last_t)
-        self.last_t = t
+def real_speed_kmh_from_requested_pwm(req_pwm: float) -> float:
+    if req_pwm <= 20:
+        return 0.0
+    if req_pwm >= 90:
+        return 120.0
+    return 120.0 * (req_pwm - 20.0) / (90.0 - 20.0)
 
-        # State transition
-        F = np.array([[1.0, dt],
-                      [0.0, 1.0]])
+# ==========================================
+# RPM -> speed interpolation
+# ==========================================
+RPM_POINTS = np.array([951.0, 1332.0, 1698.0, 2074.0, 2474.0, 2891.0, 3376.0, 3750.0])
+SPD_POINTS = np.array([0.0, 17.14, 34.29, 51.43, 68.57, 85.71, 102.86, 120.0])
 
-        # Process noise (from accel variance)
-        q = self.sigma_a ** 2
-        Q = q * np.array([[dt**4 / 4, dt**3 / 2],
-                          [dt**3 / 2, dt**2]])
+def real_speed_kmh_from_rpm(rpm: float) -> float:
+    rpm = abs(rpm)
+    return float(np.interp(rpm, RPM_POINTS, SPD_POINTS, left=0.0, right=120.0))
 
-        # Predict
-        self.x = F @ self.x
-        self.P = F @ self.P @ F.T + Q
+# ==========================================
+# Local second-order models
+# ==========================================
+MODELS = {
+    20: {"bias_rpm": 951.0,  "num": 18782.577978, "a1": 60.064827, "a0": 437.408237},
+    30: {"bias_rpm": 1332.0, "num": 13512.482244, "a1": 45.100093, "a0": 376.625465},
+    40: {"bias_rpm": 1698.0, "num": 13485.701121, "a1": 43.800590, "a0": 371.060145},
+    50: {"bias_rpm": 2074.0, "num": 14658.816429, "a1": 47.070057, "a0": 379.628758},
+    60: {"bias_rpm": 2474.0, "num": 13793.204325, "a1": 44.908179, "a0": 341.484294},
+    70: {"bias_rpm": 2891.0, "num": 14266.543945, "a1": 47.971692, "a0": 341.501125},
+    80: {"bias_rpm": 3376.0, "num": 10654.770474, "a1": 37.369263, "a0": 256.133412},
+    90: {"bias_rpm": 3750.0, "num": 9974.404622,  "a1": 42.167667, "a0": 265.583477},
+}
 
-        # Measurement update
-        H = np.array([[1.0, 0.0]])
-        R = np.array([[self.sigma_z ** 2]])
+DISC_MODELS = {}
+for pwm in PWM_LEVELS:
+    m = MODELS[pwm]
+    num = [m["num"]]
+    den = [1.0, m["a1"], m["a0"]]
 
-        y = np.array([[z]]) - (H @ self.x)          # innovation
-        S = H @ self.P @ H.T + R
-        K = self.P @ H.T @ np.linalg.inv(S)
+    numd, dend, _ = cont2discrete((num, den), TS, method="zoh")[:3]
+    numd = np.squeeze(numd)
+    dend = np.squeeze(dend)
 
-        self.x = self.x + K @ y
-        self.P = (np.eye(2) - K @ H) @ self.P
+    numd = numd / dend[0]
+    dend = dend / dend[0]
 
-        return float(self.x[0, 0]), float(self.x[1, 0])
+    DISC_MODELS[pwm] = {
+        "bias_rpm": m["bias_rpm"],
+        "numd": numd,
+        "dend": dend
+    }
 
-# ----------------------------
-# World model
-# ----------------------------
-class WorldModel:
-    def __init__(self):
-        self.points_car_frame: Deque[Tuple[float, float]] = deque(maxlen=250)  # (x_m, y_m) relative to car
-        self.closest_raw: Optional[float] = None
-        self.closest_smooth: Optional[float] = None
-        self.closest_kf: Optional[float] = None
-        self.approach_speed: Optional[float] = None
-        self.gate = RangeOutlierGate(OUTLIER_JUMP_M)
-        self.ema = EMAFilter(EMA_ALPHA)
-        self.kf = Kalman1D_DistVel()
-        self.last_detection_time = None
-        self.detection_timeout = 0.25   # seconds (tune this)
+def nearest_pwm_level(req_pwm: float) -> int:
+    if req_pwm <= 20:
+        return 20
+    return min(PWM_LEVELS, key=lambda p: abs(p - req_pwm))
 
-    def ingest(self, samples: List[SensorSample]):
-        # Convert polar to Cartesian in car frame (x forward, y left)
-        for s in samples:
-            r = s.range_m
-            if not (MIN_RANGE_M <= r <= MAX_RANGE_M):
-                continue
-            th = math.radians(s.angle_deg)
-            x = r * math.cos(th)
-            y = r * math.sin(th)
-            self.points_car_frame.append((x, y))
+# ==========================================
+# Gap logic
+# ==========================================
+def desired_follow_gap_m(v_ego_kmh: float) -> float:
+    v_ego_mps = v_ego_kmh / 3.6
+    return MIN_GAP_M + TIME_GAP_S * v_ego_mps
 
-        # For UI: define "closest obstacle" as minimum range in this batch
-        if not samples:
-            return
+def hard_safe_gap_m(v_ego_kmh: float, v_lead_kmh: float) -> float:
+    v_ego_mps = v_ego_kmh / 3.6
+    v_lead_mps = v_lead_kmh / 3.6
+    closing = max(0.0, v_ego_mps - v_lead_mps)
+    return MIN_GAP_M + TIME_GAP_S * v_ego_mps + 0.5 * closing
 
-        closest = min(s.range_m for s in samples)
-        self.closest_raw = closest
-        self.last_detection_time = time.time()
+# ==========================================
+# Graded braking helper
+# ==========================================
+def compute_brake_pwm_percent(gap_m, d_safe):
+    gap_error = d_safe - gap_m
+    if gap_error <= 0:
+        return 0.0
 
-        # Outlier gate on the "closest" distance (simple + effective)
-        if self.gate.accept(closest):
-            self.closest_smooth = self.ema.update(closest)
-            d_kf, v_kf = self.kf.update(closest, samples[0].t)
-            self.closest_kf = d_kf
-            self.approach_speed = -v_kf  # positive means approaching
-        # else: ignore update; keep last filtered values
-    def mark_no_detection(self):
-        """
-        Call this when no valid sensor samples are received.
-        Clears obstacle if it hasn't been seen recently.
-        """
-        # First time: nothing ever detected
-        if self.last_detection_time is None:
-            self.closest_raw = None
-            self.closest_smooth = None
-            self.closest_kf = None
-            self.approach_speed = None
-            self.points_car_frame.clear()
-            return
+    brake_percent = BRAKE_MIN_PWM_PERCENT + BRAKE_GAIN * gap_error
+    brake_percent = max(BRAKE_MIN_PWM_PERCENT, min(BRAKE_MAX_PWM_PERCENT, brake_percent))
+    return brake_percent
 
-        # If too much time has passed → forget obstacle
-        if time.time() - self.last_detection_time > self.detection_timeout:
-            self.closest_raw = None
-            self.closest_smooth = None
-            self.closest_kf = None
-            self.approach_speed = None
-            self.points_car_frame.clear()
-# ----------------------------
-# Rendering
-# ----------------------------
-def meters_to_screen(dx_m: float, dy_m: float) -> Tuple[int, int]:
-    # Car frame: x forward (right on screen), y left (up on screen)
-    x = int(CAR_POS[0] + dx_m * PIXELS_PER_M)
-    y = int(CAR_POS[1] - dy_m * PIXELS_PER_M)
-    return x, y
+# ==========================================
+# Predict local rpm response
+# ==========================================
+def predict_rpm_response(level_pwm, rpm_now, rpm_prev, u_cmd, u_prev, horizon):
+    model = DISC_MODELS[level_pwm]
+    bias_rpm = model["bias_rpm"]
+    numd = model["numd"]
+    dend = model["dend"]
 
-def draw_lane_dashes(screen: pygame.Surface, dash_offset: float):
-    """
-    Draw two horizontal dashed lane-divider lines that scroll left.
-    dash_offset should increase with vehicle speed.
-    """
-    y_top = CAR_POS[1] - LANE_Y_OFFSET
-    y_bottom = CAR_POS[1] + LANE_Y_OFFSET
+    b = np.zeros(3)
+    a = np.zeros(3)
+    b[:min(3, len(numd))] = numd[:min(3, len(numd))]
+    a[:min(3, len(dend))] = dend[:min(3, len(dend))]
 
-    pattern = DASH_LENGTH + GAP_LENGTH
+    yk_1 = rpm_now - bias_rpm
+    yk_2 = rpm_prev - bias_rpm
 
-    # start from off-screen so dashes always cover full width
-    start_x = -pattern + int(dash_offset % pattern)
+    uk_1 = u_prev - level_pwm
+    uk_2 = u_prev - level_pwm
 
-    for y in [y_top, y_bottom]:
-        x = start_x
-        while x < WIDTH:
-            pygame.draw.line(
-                screen,
-                LANE_COLOR,
-                (x, y),
-                (x + DASH_LENGTH, y),
-                LANE_WIDTH
-            )
-            x += pattern
+    preds = []
 
-def draw(world: WorldModel, screen: pygame.Surface, font: pygame.font.Font, dash_offset: float):    
-    global data_dict
-    screen.fill((18, 18, 22))
+    for _ in range(horizon):
+        uk = u_cmd - level_pwm
+        yk = -a[1] * yk_1 - a[2] * yk_2 + b[0] * uk + b[1] * uk_1 + b[2] * uk_2
+        rpm_pred = max(0.0, bias_rpm + yk)
+        preds.append(rpm_pred)
 
-    draw_lane_dashes(screen, dash_offset)
+        yk_2 = yk_1
+        yk_1 = yk
+        uk_2 = uk_1
+        uk_1 = uk
 
-    # Draw car
-    car_rect = pygame.Rect(0, 0, CAR_SIZE[0], CAR_SIZE[1])
-    car_rect.center = CAR_POS
-    pygame.draw.rect(screen, (240, 240, 240), car_rect, border_radius=6)
+    return np.array(preds)
 
-    # Choose one obstacle distance to display
-    obstacle_distance = None
-    if world.closest_kf is not None:
-        obstacle_distance = world.closest_kf
-    elif world.closest_smooth is not None:
-        obstacle_distance = world.closest_smooth
-    elif world.closest_raw is not None:
-        obstacle_distance = world.closest_raw
+# ==========================================
+# Controller weights
+# ==========================================
+W_SPEED_TRACK = 0.4
+W_PWM = 0.05
+W_SMOOTH = 0.4
+W_GAP = 12
+W_SAFETY = 3000
 
-    # Draw one big obstacle block only if it is in range
-    if obstacle_distance is not None and MIN_RANGE_M <= obstacle_distance <= MAX_RANGE_M:
-        obstacle_x, obstacle_y = meters_to_screen(obstacle_distance, 0.0)
+def choose_command_no_lead(pedal_percent):
+    req_pwm = requested_pwm_from_pedal(pedal_percent)
+    if req_pwm <= 0:
+        return ("COAST", 0, req_pwm)
+    return ("DRIVE", int(req_pwm * 255 / 100.0), req_pwm)
 
-        obstacle_width_px = 40
-        obstacle_height_px = 40
+def choose_command_follow(pedal_percent, gap_m, lead_speed_kmh, rpm_now, rpm_prev, u_prev_percent, stop_latched):
+    req_pwm = requested_pwm_from_pedal(pedal_percent)
+    v_ego_kmh = real_speed_kmh_from_rpm(rpm_now)
+    v_req_kmh = real_speed_kmh_from_requested_pwm(req_pwm)
 
-        obstacle_rect = pygame.Rect(
-            obstacle_x - obstacle_width_px // 2,
-            obstacle_y - obstacle_height_px // 2,
-            obstacle_width_px,
-            obstacle_height_px
+    d_safe_now = hard_safe_gap_m(v_ego_kmh, lead_speed_kmh)
+
+    if req_pwm <= 0:
+        if gap_m <= d_safe_now:
+            brake_percent = compute_brake_pwm_percent(gap_m, d_safe_now)
+            return ("BRAKE", int(brake_percent * 255 / 100.0), req_pwm, stop_latched)
+        return ("COAST", 0, req_pwm, stop_latched)
+
+    if (gap_m <= STOP_LATCH_GAP_M) and (v_ego_kmh <= STOP_SPEED_KMH):
+        stop_latched = True
+
+    if stop_latched and gap_m >= STOP_RELEASE_GAP_M:
+        stop_latched = False
+
+    if stop_latched:
+        if v_ego_kmh > 1.0:
+            brake_percent = compute_brake_pwm_percent(gap_m, max(d_safe_now, STOP_LATCH_GAP_M))
+            return ("BRAKE", int(brake_percent * 255 / 100.0), req_pwm, stop_latched)
+        return ("COAST", 0, req_pwm, stop_latched)
+
+    if gap_m > DISTANCE_ACTIVE_M:
+        return ("DRIVE", int(req_pwm * 255 / 100.0), req_pwm, stop_latched)
+
+    if gap_m <= d_safe_now:
+        brake_percent = compute_brake_pwm_percent(gap_m, d_safe_now)
+        return ("BRAKE", int(brake_percent * 255 / 100.0), req_pwm, stop_latched)
+
+    level = nearest_pwm_level(req_pwm)
+    candidates = list(range(0, 91, 5))
+
+    best_cost = 1e18
+    best_u = 0
+
+    for u_cmd in candidates:
+        rpm_pred = predict_rpm_response(
+            level_pwm=level,
+            rpm_now=rpm_now,
+            rpm_prev=rpm_prev,
+            u_cmd=u_cmd,
+            u_prev=u_prev_percent,
+            horizon=HORIZON
         )
-        state = "obstacle detected"
-        pygame.draw.rect(screen, (255, 130, 90), obstacle_rect, border_radius=4)
 
-    else:
-        state = "Obstacle Distance is None"
+        v_pred = np.array([real_speed_kmh_from_rpm(r) for r in rpm_pred])
 
-    #HUD setup
-    drive_indicator = data_dict["drive"]
-    delta_indicator = data_dict["delta"]
-    pwm_indicator = data_dict["pwm"]
-    distance_indicator = data_dict["Obstacle_Distance"]
-    Encoder_indicator = data_dict["Encoder_Count"]
-    direction_indicator = data_dict["Direction"]
-    rpm_indicator = data_dict["RPM"]
+        d = gap_m
+        J = 0.0
 
-    #HUD
-    lines = [
-        f"approach_speed: {world.approach_speed:.2f} m/s" if world.approach_speed is not None else "approach_speed: -",
-        f"DRIVE: {drive_indicator}" if drive_indicator is not None else "DRIVE: -",
-        f"DELTA: {delta_indicator}" if delta_indicator is not None else "DELTA: -",
-        f"PWM: {pwm_indicator}" if pwm_indicator is not None else "PWM: -",
-        f"Obstacle_Distance: {distance_indicator}" if distance_indicator is not None else "Obstacle_Distance: -",
-        f"State: {state}" if state is not None else "Obstacle State: -",
-        f"Encoder_Count: {Encoder_indicator}" if Encoder_indicator is not None else "ENcoder_Count: -",
-        f"Direction: {direction_indicator}" if direction_indicator is not None else "Direction: -",
-        f"RPM: {rpm_indicator}" if rpm_indicator is not None else "RPM: -"
+        for k in range(HORIZON):
+            v_ego_mps = v_pred[k] / 3.6
+            v_lead_mps = lead_speed_kmh / 3.6
+
+            d = max(0.0, d + TS * (v_lead_mps - v_ego_mps))
+            d_safe = hard_safe_gap_m(v_pred[k], lead_speed_kmh)
+
+            J += W_SPEED_TRACK * (v_pred[k] - v_req_kmh) ** 2
+            J += W_PWM * (u_cmd - req_pwm) ** 2
+            J += W_SMOOTH * (u_cmd - u_prev_percent) ** 2
+
+            gap_shortfall = max(0.0, d_safe - d)
+            J += W_GAP * (gap_shortfall ** 2)
+
+            if d < d_safe:
+                J += W_SAFETY * (d_safe - d) ** 2
+
+        if J < best_cost:
+            best_cost = J
+            best_u = u_cmd
+
+    if best_u <= 0:
+        if gap_m < d_safe_now - BRAKE_RELEASE_MARGIN_M:
+            brake_percent = compute_brake_pwm_percent(gap_m, d_safe_now)
+            return ("BRAKE", int(brake_percent * 255 / 100.0), req_pwm, stop_latched)
+        return ("COAST", 0, req_pwm, stop_latched)
+
+    return ("DRIVE", int(best_u * 255 / 100.0), req_pwm, stop_latched)
+
+def ultrasonic_cm_to_virtual_gap_m(dist_cm: float):
+    """
+    Convert real ultrasonic distance in cm into virtual road gap in meters.
+
+    This is intentional scaling:
+    the HC-SR04 gives short physical distances, while the MPC safe gap is based
+    on a simulated car traveling at road speeds.
+    """
+    if dist_cm <= 0.0 or dist_cm >= NO_OBSTACLE_THRESHOLD_CM:
+        return None
+
+    ratio = dist_cm / NO_OBSTACLE_THRESHOLD_CM
+    return ratio * VIRTUAL_GAP_AT_THRESHOLD_M
+
+
+def parse_latest_telemetry(ser, latest_raw_cm, ultra_gap_m, last_ultra_time):
+    pedal_percent = None
+    rpm_now = None
+
+    latest_line = None
+    while True:
+        line = ser.readline().decode("utf-8", errors="ignore").strip()
+        if not line:
+            break
+        latest_line = line
+
+    if latest_line is None:
+        return pedal_percent, rpm_now, latest_raw_cm, ultra_gap_m, last_ultra_time
+
+    if latest_line == "READY":
+        return pedal_percent, rpm_now, latest_raw_cm, ultra_gap_m, last_ultra_time
+
+    if latest_line.startswith("TEL,"):
+        parts = latest_line.split(",")
+        if len(parts) == 5:
+            try:
+                _, _time_ms_str, pedal_str, dist_str, rpm_str = parts
+                pedal_percent = float(pedal_str)
+                rpm_now = float(rpm_str)
+
+                dist_cm = float(dist_str)
+                latest_raw_cm = dist_cm
+
+                new_gap_m = ultrasonic_cm_to_virtual_gap_m(dist_cm)
+
+                if new_gap_m is None:
+                    # No valid obstacle in front. Clear the obstacle immediately
+                    # so the red block disappears when the sensor returns max/no-hit.
+                    ultra_gap_m = None
+                    last_ultra_time = None
+                else:
+                    if ultra_gap_m is None:
+                        ultra_gap_m = new_gap_m
+                    else:
+                        ultra_gap_m = ULTRA_ALPHA * new_gap_m + (1.0 - ULTRA_ALPHA) * ultra_gap_m
+                    last_ultra_time = time.time()
+            except ValueError:
+                pass
+
+    if last_ultra_time is not None and (time.time() - last_ultra_time) > OBSTACLE_TIMEOUT_S:
+        ultra_gap_m = None
+
+    return pedal_percent, rpm_now, latest_raw_cm, ultra_gap_m, last_ultra_time
+
+# ==========================================
+# Setup
+# ==========================================
+pygame.init()
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("One-Pedal Drive Prototype - Ultrasonic Obstacle Following")
+clock = pygame.time.Clock()
+font = pygame.font.SysFont("consolas", 22)
+
+ser = serial.Serial(PORT, BAUD, timeout=0.001)
+time.sleep(2)
+ser.reset_input_buffer()
+
+print("Connected. Waiting for Arduino READY...")
+
+pedal_percent = 0.0
+rpm_now = 0.0
+prev_rpm = 0.0
+prev_cmd_pwm_percent = 0.0
+stop_latched = False
+
+ego_distance_m = 0.0
+lead_active = False
+gap_m = None
+ultra_gap_m = None
+latest_raw_cm = None
+last_ultra_time = None
+
+last_control_time = 0.0
+mode = "COAST"
+sent_mode = "COAST"
+sent_pwm255 = 0
+pwm255 = 0
+req_pwm = 0.0
+lead_speed_kmh = 0.0
+displayed_gap_m = None
+desired_gap_m = None
+safe_gap_m = None
+
+running = True
+
+while running:
+    dt = clock.tick(FPS) / 1000.0
+    if dt <= 0:
+        dt = 1.0 / FPS
+
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+    new_pedal, new_rpm, latest_raw_cm, ultra_gap_m, last_ultra_time = parse_latest_telemetry(
+        ser, latest_raw_cm, ultra_gap_m, last_ultra_time
+    )
+    if new_pedal is not None:
+        pedal_percent = new_pedal
+    if new_rpm is not None:
+        rpm_now = new_rpm
+
+    ego_speed_kmh = real_speed_kmh_from_rpm(rpm_now)
+    ego_speed_mps = ego_speed_kmh / 3.6
+    ego_distance_m += ego_speed_mps * dt
+
+    lead_active = ultra_gap_m is not None
+    gap_m = ultra_gap_m if lead_active else None
+    if not lead_active:
+        stop_latched = False
+
+    now = time.time()
+    if now - last_control_time >= CONTROL_PERIOD:
+        last_control_time = now
+
+        if not lead_active:
+            mode, pwm255, req_pwm = choose_command_no_lead(pedal_percent)
+            lead_speed_kmh = 0.0
+            displayed_gap_m = None
+            desired_gap_m = None
+            safe_gap_m = None
+        else:
+            lead_speed_kmh = 0.0
+            displayed_gap_m = gap_m
+            desired_gap_m = desired_follow_gap_m(ego_speed_kmh)
+            safe_gap_m = hard_safe_gap_m(ego_speed_kmh, lead_speed_kmh)
+
+            mode, pwm255, req_pwm, stop_latched = choose_command_follow(
+                pedal_percent=pedal_percent,
+                gap_m=gap_m,
+                lead_speed_kmh=lead_speed_kmh,
+                rpm_now=abs(rpm_now),
+                rpm_prev=abs(prev_rpm),
+                u_prev_percent=prev_cmd_pwm_percent,
+                stop_latched=stop_latched
+            )
+
+        # Do not let BRAKE command spin the motor in reverse during bench testing.
+        # The controller may still report BRAKE as the internal decision, but the
+        # Arduino receives COAST unless SEND_REVERSE_BRAKE is True.
+        if mode == "BRAKE" and not SEND_REVERSE_BRAKE:
+            sent_mode = "COAST"
+            sent_pwm255 = 0
+        else:
+            sent_mode = mode
+            sent_pwm255 = pwm255
+
+        cmd_str = f"CMD,{sent_mode},{sent_pwm255}\n"
+        ser.write(cmd_str.encode("utf-8"))
+
+        prev_rpm = rpm_now
+        prev_cmd_pwm_percent = sent_pwm255 * 100.0 / 255.0
+
+    # ==========================================
+    # Draw UI
+    # ==========================================
+    screen.fill(BLACK)
+    pygame.draw.line(screen, GRAY, (0, ROAD_Y), (WIDTH, ROAD_Y), 2)
+
+    pygame.draw.rect(screen, WHITE, (EGO_X, EGO_Y, CAR_W, CAR_H))
+
+    if lead_active and gap_m is not None:
+        draw_gap_m = max(gap_m, MIN_VISUAL_GAP_M)
+        lead_x = EGO_X + CAR_W + int(draw_gap_m * PIXELS_PER_METER_RENDER)
+        lead_y = EGO_Y
+        if lead_x < WIDTH + 100:
+            pygame.draw.rect(screen, RED, (lead_x, lead_y, CAR_W, CAR_H))
+
+        if desired_gap_m is not None:
+            des_x = EGO_X + CAR_W + int(desired_gap_m * PIXELS_PER_METER_RENDER)
+            pygame.draw.line(screen, YELLOW, (des_x, ROAD_Y - 90), (des_x, ROAD_Y + 10), 2)
+
+        if safe_gap_m is not None:
+            safe_x = EGO_X + CAR_W + int(min(safe_gap_m, 140.0) * PIXELS_PER_METER_RENDER)
+            pygame.draw.line(screen, GREEN, (safe_x, ROAD_Y - 70), (safe_x, ROAD_Y + 10), 2)
+
+        if desired_gap_m is not None:
+            pygame.draw.rect(
+                screen,
+                BLUE,
+                (EGO_X + CAR_W, ROAD_Y - 8, int(min(desired_gap_m, 140.0) * PIXELS_PER_METER_RENDER), 8)
+            )
+
+    pygame.draw.rect(screen, GRAY, (40, 360, 250, 18), 2)
+    pygame.draw.rect(screen, CYAN, (42, 362, int(246 * pedal_percent / 100.0), 14))
+
+    text_lines = [
+        f"Pedal:            {pedal_percent:6.1f} %",
+        f"Req PWM:          {req_pwm:6.1f} %",
+        f"Applied PWM:      {pwm255 * 100.0 / 255.0:6.1f} %",
+        f"Ego RPM:          {rpm_now:6.1f}",
+        f"Ego speed:        {ego_speed_kmh:6.1f} km/h",
+        f"Ego distance:     {ego_distance_m:6.1f} m",
+        f"Raw ultrasonic:   {latest_raw_cm:6.1f} cm" if latest_raw_cm is not None else "Raw ultrasonic:   ---",
+        f"Obstacle active:  {lead_active}",
     ]
 
-    y0 = 18
-    for i, txt in enumerate(lines):
-        surf = font.render(txt, True, (235, 235, 235))
-        screen.blit(surf, (18, y0 + 22 * i))
+    if lead_active and displayed_gap_m is not None:
+        text_lines += [
+            f"Lead speed:       {lead_speed_kmh:6.1f} km/h",
+            f"Gap:              {displayed_gap_m:6.2f} m",
+            f"Desired gap:      {desired_gap_m:6.1f} m" if desired_gap_m is not None else "Desired gap:      ---",
+            f"Safe gap:         {safe_gap_m:6.1f} m" if safe_gap_m is not None else "Safe gap:         ---",
+        ]
+    else:
+        text_lines += [
+            "Lead speed:       ---",
+            "Gap:              ---",
+            "Desired gap:      ---",
+            "Safe gap:         ---",
+        ]
 
-#Communication:
+    text_lines += [
+        f"Mode:             {mode}",
+        f"Stop latched:     {stop_latched}",
+    ]
 
-def read_from_arduino(com_port, baud_rate):
-    global data_dict
-    try:
-        ser = serial.Serial(com_port, baud_rate, timeout=1)
-        time.sleep(2) # Give the connection time to establish
-        print(f"Connected to {com_port}")
+    # Keep HUD at the top. After every 8 lines, start a new column farther right.
+    # Also leave clearance above the vehicle area.
+    max_text_bottom = EGO_Y - HUD_VEHICLE_CLEARANCE
 
-        while True:
-            if ser.in_waiting > 0:
-                # Read the line, decode it from bytes to string, and strip whitespace/newline
-                data_line = ser.readline().decode('utf-8').strip()
-                if data_line:
-                    data_array = data_line.split(',')
-                    data_dict = {
-                        "drive": data_array[0],
-                        "delta": data_array[1],
-                        "pwm": data_array[2],
-                        "Obstacle_Distance": data_array[3],
-                        "Mode": data_array[4],
-                        "Encoder_Count": data_array[5],
-                        "Direction": data_array[6],
-                        "RPM": data_array[7]
-                    }
-                   
-                    #print(f"Received: {data_dict}")
-                if MIN_RANGE_M <= float(data_dict["Obstacle_Distance"]) <= MAX_RANGE_M:
-                    sample = SensorSample(
-                        t=time.time(),
-                        angle_deg=0.0,
-                        range_m=float(data_dict["Obstacle_Distance"])
-                    )
-                    data_queue.put(sample)
-                else:
-                    print(f"Distance out of range for sim")
+    for i, txt in enumerate(text_lines):
+        col = i // HUD_LINES_PER_COLUMN
+        row = i % HUD_LINES_PER_COLUMN
+        x = HUD_X_START + col * (HUD_COLUMN_W + HUD_COLUMN_GAP)
+        y = HUD_Y_START + row * HUD_LINE_H
 
-    except serial.SerialException as e:
-        print(f"Error opening serial port: {e}")
-    except KeyboardInterrupt:
-        print("Serial communication stopped by user")
-    finally:
-        if 'ser' in locals() and ser.isOpen():
-            ser.close()
+        # Safety guard: if text would still go too low, wrap again.
+        if y > max_text_bottom:
+            extra_rows = max(1, int((max_text_bottom - HUD_Y_START) // HUD_LINE_H) + 1)
+            col = i // extra_rows
+            row = i % extra_rows
+            x = HUD_X_START + col * (HUD_COLUMN_W + HUD_COLUMN_GAP)
+            y = HUD_Y_START + row * HUD_LINE_H
 
-# ----------------------------
-# Main loop
-# ----------------------------
-def main():
+        surf = font.render(txt, True, WHITE)
+        screen.blit(surf, (x, y))
 
-    if platform.system() == "Darwin":   # Mac
-        arduino_port = "/dev/tty.usbmodem1101"
-    elif platform.system() == "Windows":
-        arduino_port = "COM6"
-    else: 
-        arduino_port = "/dev/ttyUSB0" # Update this to your Arduino's port 
-    baud_rate = 9600
-    # start the serial reader on a separate thread so the rest of main can run
-    reader_thread = threading.Thread(target=read_from_arduino, args=(arduino_port, baud_rate), daemon=True)
-    reader_thread.start()
+    pygame.display.flip()
 
-    pygame.init()
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("Obstacle Proximity Simulator (Arduino stream ready)")
-    clock = pygame.time.Clock()
-    font = pygame.font.SysFont("consolas", 18)
-
-    world = WorldModel()
-    t0 = time.time()
-
-    running = True
-    dash_offset = 0.0
-    while running:
-        dt = clock.tick(FPS) / 1000.0
-
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-
-        # Replace this with: samples = serial_reader.read_latest_batch()
-        samples = []
-        while True:
-            try:
-                sample = data_queue.get_nowait()
-                samples.append(sample)
-                speed_value = abs(float(data_dict["RPM"]))   
-            except (ValueError, TypeError):
-                speed_value = 0.0  
-            except Empty:
-                break
-
-            dash_speed_px_per_sec = speed_value * 0.5
-            dash_offset += dash_speed_px_per_sec * dt
-        if samples:
-            world.ingest(samples)
-        else:
-            world.mark_no_detection()
-        draw(world, screen, font, dash_offset)
-        pygame.display.flip()
-
-    pygame.quit()
-
-if __name__ == "__main__":
-    main()
+ser.close()
+pygame.quit()
