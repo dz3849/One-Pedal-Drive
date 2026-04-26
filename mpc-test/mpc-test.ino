@@ -3,7 +3,7 @@
 // =====================================
 // Arduino sensor/actuator node for Python MPC
 // L298N + HC-SR04 + pedal + encoder
-// with pedal filtering
+// with pedal filtering + state LEDs
 // =====================================
 
 // ---------- Pedal ----------
@@ -19,6 +19,14 @@ const int PEDAL_DEADBAND = 1;     // suppress tiny 1% jitter
 const int IN3 = 8;
 const int IN4 = 9;
 const int ENB = 10;
+
+// ---------- State indicator LEDs ----------
+const int accelLED = 6;
+const int decelLED = 4;
+const int neutralLED = 5;
+float prevAbsRPM = 0.0;
+const float RPM_CHANGE_THRESHOLD = 70.0;  
+const float STOP_RPM_THRESHOLD = 6.0;
 
 // ---------- Ultrasonic (HC-SR04) ----------
 const int MAX_DISTANCE_CM = 150;
@@ -54,6 +62,37 @@ void encoderISR_A() {
   else encoderCount--;
 }
 
+// ---------- LED helper ----------
+void updateStateLEDsFromEncoder(float currentRPM, float previousAbsRPM) {
+  float absRPM = abs(currentRPM);
+  float rpmChange = absRPM - previousAbsRPM;
+
+  // If motor is basically stopped, show neutral
+  if (absRPM < STOP_RPM_THRESHOLD) {
+    digitalWrite(accelLED, LOW);
+    digitalWrite(decelLED, LOW);
+    digitalWrite(neutralLED, HIGH);
+  }
+  // Speed is increasing
+  else if (rpmChange > RPM_CHANGE_THRESHOLD) {
+    digitalWrite(accelLED, HIGH);
+    digitalWrite(decelLED, LOW);
+    digitalWrite(neutralLED, LOW);
+  }
+  // Speed is decreasing
+  else if (rpmChange < -RPM_CHANGE_THRESHOLD) {
+    digitalWrite(accelLED, LOW);
+    digitalWrite(decelLED, HIGH);
+    digitalWrite(neutralLED, LOW);
+  }
+  // Speed is roughly constant
+  else {
+    digitalWrite(accelLED, LOW);
+    digitalWrite(decelLED, LOW);
+    digitalWrite(neutralLED, HIGH);
+  }
+}
+
 // ---------- Motor helpers ----------
 void forwardDrive(int pwm255) {
   pwm255 = constrain(pwm255, 0, 255);
@@ -78,9 +117,11 @@ void coastStop() {
 void applyCommand() {
   if (currentMode == "DRIVE") {
     forwardDrive(currentPWM255);
-  } else if (currentMode == "BRAKE") {
+  } 
+  else if (currentMode == "BRAKE") {
     reverseBrake(currentPWM255);
-  } else {
+  } 
+  else {
     coastStop();
   }
 }
@@ -108,6 +149,10 @@ void setup() {
   pinMode(IN3, OUTPUT);
   pinMode(IN4, OUTPUT);
   pinMode(ENB, OUTPUT);
+
+  pinMode(accelLED, OUTPUT);
+  pinMode(decelLED, OUTPUT);
+  pinMode(neutralLED, OUTPUT);
 
   pinMode(ENC_A, INPUT_PULLUP);
   pinMode(ENC_B, INPUT_PULLUP);
@@ -141,21 +186,25 @@ void loop() {
   unsigned long now = millis();
 
   // ---------- Update RPM ----------
-  if (now - lastRPMMs >= TELEMETRY_PERIOD_MS) {
-    noInterrupts();
-    long countNow = encoderCount;
-    interrupts();
+if (now - lastRPMMs >= TELEMETRY_PERIOD_MS) {
+  noInterrupts();
+  long countNow = encoderCount;
+  interrupts();
 
-    long deltaCount = countNow - lastCountForRPM;
-    float dt = (now - lastRPMMs) / 1000.0;
+  long deltaCount = countNow - lastCountForRPM;
+  float dt = (now - lastRPMMs) / 1000.0;
 
-    if (dt > 0) {
-      rpm = (deltaCount / CPR) / dt * 60.0;
-    }
-
-    lastCountForRPM = countNow;
-    lastRPMMs = now;
+  if (dt > 0) {
+    rpm = (deltaCount / CPR) / dt * 60.0;
   }
+
+  // Update LEDs based on encoder speed change
+  updateStateLEDsFromEncoder(rpm, prevAbsRPM);
+  prevAbsRPM = abs(rpm);
+
+  lastCountForRPM = countNow;
+  lastRPMMs = now;
+}
 
   // ---------- Send telemetry ----------
   if (now - lastTelemetryMs >= TELEMETRY_PERIOD_MS) {
