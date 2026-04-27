@@ -25,7 +25,7 @@ const int accelLED = 6;
 const int decelLED = 4;
 const int neutralLED = 5;
 float prevAbsRPM = 0.0;
-const float RPM_CHANGE_THRESHOLD = 70.0;  
+const float RPM_CHANGE_THRESHOLD = 80.0;  
 const float STOP_RPM_THRESHOLD = 6.0;
 
 // ---------- Ultrasonic (HC-SR04) ----------
