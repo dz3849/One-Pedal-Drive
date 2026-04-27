@@ -5,9 +5,8 @@ import pygame
 import platform
 from scipy.signal import cont2discrete
 
-# ==========================================
+
 # Serial
-# ==========================================
 if platform.system() == "Darwin": 
     PORT = "/dev/tty.usbmodem1101"
 elif platform.system() == "Windows":
@@ -17,16 +16,12 @@ else:
 
 BAUD = 115200
 
-# ==========================================
 # Timing / MPC
-# ==========================================
 TS = 0.10
 HORIZON = 15
 CONTROL_PERIOD = TS
 
-# ==========================================
-# UI
-# ==========================================
+# UI Setup
 WIDTH = 1280
 HEIGHT = 420
 FPS = 30
@@ -54,31 +49,19 @@ HUD_COLUMN_W = 360
 HUD_COLUMN_GAP = 70
 HUD_VEHICLE_CLEARANCE = 24
 
-# Keep controller in meters.
-# IMPORTANT:
-# The ultrasonic sensor only measures about 0-150 cm, but the MPC safe gap is in
-# road-scale meters. So we map physical sensor cm into a larger virtual road gap.
-
 PIXELS_PER_METER_RENDER = 12.0
 MIN_VISUAL_GAP_M = 1.0
 
-# ==========================================
-# Ultrasonic handling
-# ==========================================
+# Ultrasonic Parameters
 MAX_DISTANCE_CM = 130
 NO_OBSTACLE_THRESHOLD_CM = 125  
 VIRTUAL_GAP_AT_THRESHOLD_M = 100  
 ULTRA_ALPHA = 0.30
 OBSTACLE_TIMEOUT_S = 0.35
 
-# Bench safety:
-# False means MPC can choose BRAKE internally, but Arduino receives COAST instead
-# of reverse motor drive. This prevents the motor from spinning backward wildly.
 SEND_REVERSE_BRAKE = False
 
-# ==========================================
 # Following-distance logic
-# ==========================================
 DISTANCE_ACTIVE_M = 60.0
 MIN_GAP_M = 8.0
 TIME_GAP_S = 1.2
@@ -87,17 +70,13 @@ STOP_LATCH_GAP_M = 9.0
 STOP_RELEASE_GAP_M = 11.0
 STOP_SPEED_KMH = 2.0
 
-# ==========================================
 # Graded braking parameters
-# ==========================================
 BRAKE_MIN_PWM_PERCENT = 10.0
 BRAKE_MAX_PWM_PERCENT = 25.0
 BRAKE_GAIN = 4.0
 BRAKE_RELEASE_MARGIN_M = 1.0 
 
-# ==========================================
 # PWM operating region
-# ==========================================
 PWM_LEVELS = [20, 30, 40, 50, 60, 70, 80, 90]
 
 def requested_pwm_from_pedal(pedal_percent: float) -> float:
@@ -114,9 +93,7 @@ def real_speed_kmh_from_requested_pwm(req_pwm: float) -> float:
         return 120.0
     return 120.0 * (req_pwm - 20.0) / (90.0 - 20.0)
 
-# ==========================================
-# RPM -> speed interpolation
-# ==========================================
+# RPM to speed interpolation
 RPM_POINTS = np.array([951.0, 1332.0, 1698.0, 2074.0, 2474.0, 2891.0, 3376.0, 3750.0])
 SPD_POINTS = np.array([0.0, 17.14, 34.29, 51.43, 68.57, 85.71, 102.86, 120.0])
 
@@ -124,9 +101,7 @@ def real_speed_kmh_from_rpm(rpm: float) -> float:
     rpm = abs(rpm)
     return float(np.interp(rpm, RPM_POINTS, SPD_POINTS, left=0.0, right=120.0))
 
-# ==========================================
 # Local second-order models
-# ==========================================
 MODELS = {
     20: {"bias_rpm": 951.0,  "num": 18782.577978, "a1": 60.064827, "a0": 437.408237},
     30: {"bias_rpm": 1332.0, "num": 13512.482244, "a1": 45.100093, "a0": 376.625465},
@@ -162,9 +137,7 @@ def nearest_pwm_level(req_pwm: float) -> int:
         return 20
     return min(PWM_LEVELS, key=lambda p: abs(p - req_pwm))
 
-# ==========================================
 # Gap logic
-# ==========================================
 def desired_follow_gap_m(v_ego_kmh: float) -> float:
     v_ego_mps = v_ego_kmh / 3.6
     return MIN_GAP_M + TIME_GAP_S * v_ego_mps
@@ -175,9 +148,7 @@ def hard_safe_gap_m(v_ego_kmh: float, v_lead_kmh: float) -> float:
     closing = max(0.0, v_ego_mps - v_lead_mps)
     return MIN_GAP_M + TIME_GAP_S * v_ego_mps + 0.5 * closing
 
-# ==========================================
-# Graded braking helper
-# ==========================================
+# Graded braking 
 def compute_brake_pwm_percent(gap_m, d_safe):
     gap_error = d_safe - gap_m
     if gap_error <= 0:
@@ -187,9 +158,7 @@ def compute_brake_pwm_percent(gap_m, d_safe):
     brake_percent = max(BRAKE_MIN_PWM_PERCENT, min(BRAKE_MAX_PWM_PERCENT, brake_percent))
     return brake_percent
 
-# ==========================================
 # Predict local rpm response
-# ==========================================
 def predict_rpm_response(level_pwm, rpm_now, rpm_prev, u_cmd, u_prev, horizon):
     model = DISC_MODELS[level_pwm]
     bias_rpm = model["bias_rpm"]
@@ -222,9 +191,7 @@ def predict_rpm_response(level_pwm, rpm_now, rpm_prev, u_cmd, u_prev, horizon):
 
     return np.array(preds)
 
-# ==========================================
 # Controller weights
-# ==========================================
 W_SPEED_TRACK = 0.4
 W_PWM = 0.05
 W_SMOOTH = 0.4
@@ -320,13 +287,6 @@ def choose_command_follow(pedal_percent, gap_m, lead_speed_kmh, rpm_now, rpm_pre
     return ("DRIVE", int(best_u * 255 / 100.0), req_pwm, stop_latched)
 
 def ultrasonic_cm_to_virtual_gap_m(dist_cm: float):
-    """
-    Convert real ultrasonic distance in cm into virtual road gap in meters.
-
-    This is intentional scaling:
-    the HC-SR04 gives short physical distances, while the MPC safe gap is based
-    on a simulated car traveling at road speeds.
-    """
     if dist_cm <= 0.0 or dist_cm >= NO_OBSTACLE_THRESHOLD_CM:
         return None
 
@@ -365,8 +325,6 @@ def parse_latest_telemetry(ser, latest_raw_cm, ultra_gap_m, last_ultra_time):
                 new_gap_m = ultrasonic_cm_to_virtual_gap_m(dist_cm)
 
                 if new_gap_m is None:
-                    # No valid obstacle in front. Clear the obstacle immediately
-                    # so the red block disappears when the sensor returns max/no-hit.
                     ultra_gap_m = None
                     last_ultra_time = None
                 else:
@@ -383,9 +341,7 @@ def parse_latest_telemetry(ser, latest_raw_cm, ultra_gap_m, last_ultra_time):
 
     return pedal_percent, rpm_now, latest_raw_cm, ultra_gap_m, last_ultra_time
 
-# ==========================================
-# Setup
-# ==========================================
+# Main Setup
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("One-Pedal Drive Prototype - Ultrasonic Obstacle Following")
@@ -476,9 +432,6 @@ while running:
                 stop_latched=stop_latched
             )
 
-        # Do not let BRAKE command spin the motor in reverse during bench testing.
-        # The controller may still report BRAKE as the internal decision, but the
-        # Arduino receives COAST unless SEND_REVERSE_BRAKE is True.
         if mode == "BRAKE" and not SEND_REVERSE_BRAKE:
             sent_mode = "COAST"
             sent_pwm255 = 0
@@ -492,9 +445,7 @@ while running:
         prev_rpm = rpm_now
         prev_cmd_pwm_percent = sent_pwm255 * 100.0 / 255.0
 
-    # ==========================================
     # Draw UI
-    # ==========================================
     screen.fill(BLACK)
     pygame.draw.line(screen, GRAY, (0, ROAD_Y), (WIDTH, ROAD_Y), 2)
 
@@ -556,8 +507,7 @@ while running:
         f"Stop latched:     {stop_latched}",
     ]
 
-    # Keep HUD at the top. After every 8 lines, start a new column farther right.
-    # Also leave clearance above the vehicle area.
+
     max_text_bottom = EGO_Y - HUD_VEHICLE_CLEARANCE
 
     for i, txt in enumerate(text_lines):
@@ -566,7 +516,6 @@ while running:
         x = HUD_X_START + col * (HUD_COLUMN_W + HUD_COLUMN_GAP)
         y = HUD_Y_START + row * HUD_LINE_H
 
-        # Safety guard: if text would still go too low, wrap again.
         if y > max_text_bottom:
             extra_rows = max(1, int((max_text_bottom - HUD_Y_START) // HUD_LINE_H) + 1)
             col = i // extra_rows
